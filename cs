@@ -9,7 +9,10 @@ set -euo pipefail
 #   cs --update                Re-index sessions before searching
 
 SESSION_DIR="$HOME/.cache/claude-search/sessions"
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Resolve symlinks so SCRIPT_DIR points to the repo, not the symlink location
+SELF="$0"
+[[ -L "$SELF" ]] && SELF="$(readlink "$SELF")"
+SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
 
 # ── Search helper ───────────────────────────────────────────────────────
 #
