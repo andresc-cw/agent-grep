@@ -7,9 +7,9 @@ Type a few words about what you discussed, pick the session from a list, and you
 ## Usage
 
 ```bash
-sg"billing bug"     # search session content, pick one, resume it
-sg--list            # browse all sessions, type to filter by content
-sg--update          # re-index before searching
+sg "billing bug"    # search session content, pick one, resume it
+sg --list           # browse all sessions, type to filter by content
+sg --update         # re-index before searching
 ```
 
 ## Architecture

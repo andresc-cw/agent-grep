@@ -54,8 +54,8 @@ elif [[ $# -gt 0 ]]; then
     INITIAL_QUERY="$*"
 else
     echo "Usage: sg <search terms>"
-    echo "       sg--list"
-    echo "       sg--update [search terms]"
+    echo "       sg --list"
+    echo "       sg --update [search terms]"
     exit 1
 fi
 
