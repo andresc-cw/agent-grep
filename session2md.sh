@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-OUT_DIR="$HOME/.cache/claude-search/sessions"
+OUT_DIR="$HOME/.cache/agent-grep/sessions"
 CLAUDE_DIR="$HOME/.claude/projects"
 CODEX_DIR="$HOME/.codex/sessions"
 

@@ -4,7 +4,7 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.claude-search.session2md</string>
+    <string>com.agent-grep.session2md</string>
     <key>Program</key>
     <string>/Users/acrucettanieto/Documents/Git/claude-search/session2md.sh</string>
     <key>EnvironmentVariables</key>

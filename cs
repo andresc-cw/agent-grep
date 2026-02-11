@@ -8,7 +8,7 @@ set -euo pipefail
 #   cs --list                  Browse all sessions, type to search content
 #   cs --update                Re-index sessions before searching
 
-SESSION_DIR="$HOME/.cache/claude-search/sessions"
+SESSION_DIR="$HOME/.cache/agent-grep/sessions"
 # Resolve symlinks so SCRIPT_DIR points to the repo, not the symlink location
 SELF="$0"
 [[ -L "$SELF" ]] && SELF="$(readlink "$SELF")"

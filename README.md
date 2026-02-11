@@ -16,7 +16,7 @@ cs --update          # re-index before searching
 
 ```
 ~/.claude/projects/**/*.jsonl ─┐
-                               ├── session2md.sh ──► ~/.cache/claude-search/sessions/*.md
+                               ├── session2md.sh ──► ~/.cache/agent-grep/sessions/*.md
 ~/.codex/sessions/**/*.jsonl ──┘       (jq)                     │
                                                                 │
                        launchd runs session2md.sh          qmd collection
@@ -76,11 +76,11 @@ ln -s "$(pwd)/cs" ~/.local/bin/cs
 
 # 3. Initial index
 ./session2md.sh                                              # convert sessions
-qmd collection add ~/.cache/claude-search/sessions --name sessions  # build search index
+qmd collection add ~/.cache/agent-grep/sessions --name sessions  # build search index
 
 # 4. (Optional) Auto-index every 5 minutes
-cp com.claude-search.session2md.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.claude-search.session2md.plist
+cp com.agent-grep.session2md.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.agent-grep.session2md.plist
 ```
 
 ## Dependencies
@@ -108,4 +108,4 @@ launchctl load ~/Library/LaunchAgents/com.claude-search.session2md.plist
 | `cs` | Search + fzf picker + auto-resume |
 | `session2md.sh` | JSONL to markdown converter (bash + jq) |
 | `.cs_fmt.awk` | gawk program for fast frontmatter extraction |
-| `com.claude-search.session2md.plist` | launchd plist for background indexing |
+| `com.agent-grep.session2md.plist` | launchd plist for background indexing |
