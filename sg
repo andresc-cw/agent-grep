@@ -4,9 +4,9 @@ set -euo pipefail
 # sg — search Claude Code & Codex sessions, pick one with fzf, resume it
 #
 # Usage:
-#   sg<search terms>          Search sessions and pick one to resume
-#   sg--list                  Browse all sessions, type to search content
-#   sg--update                Re-index sessions before searching
+#   sg <search terms>         Search sessions and pick one to resume
+#   sg --list                 Browse all sessions, type to search content
+#   sg --update [search terms] Re-index sessions before searching
 
 SESSION_DIR="$HOME/.cache/agent-grep/sessions"
 # Resolve symlinks so SCRIPT_DIR points to the repo, not the symlink location
@@ -22,8 +22,39 @@ SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
 
 AWK_FMT="$SCRIPT_DIR/.sg_fmt.awk"
 
+usage() {
+    cat <<EOF
+Usage: sg <search terms>
+       sg --list
+       sg --update [search terms]
+       sg --help
+EOF
+}
+
+die() {
+    echo "sg: $*" >&2
+    exit 1
+}
+
+check_dependencies() {
+    local missing=()
+    local cmd
+    for cmd in rg gawk fzf; do
+        command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
+    done
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        die "missing dependencies: ${missing[*]} (install with: brew install ripgrep gawk fzf)"
+    fi
+}
+
+[[ -f "$AWK_FMT" ]] || die "formatter not found: $AWK_FMT"
+
 HELPER=$(mktemp "${TMPDIR:-/tmp}/sg-helper.XXXXX")
-trap 'rm -f "$HELPER"' EXIT
+cleanup() {
+    rm -f "$HELPER"
+}
+trap cleanup EXIT INT TERM
 
 cat > "$HELPER" << HELPEREOF
 #!/usr/bin/env bash
@@ -41,31 +72,83 @@ chmod +x "$HELPER"
 
 # ── Handle flags ────────────────────────────────────────────────────────
 
-if [[ "${1:-}" == "--update" ]]; then
+DO_UPDATE=0
+LIST_MODE=0
+QUERY_ARGS=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        --update)
+            DO_UPDATE=1
+            shift
+            ;;
+        --list)
+            LIST_MODE=1
+            shift
+            ;;
+        --)
+            shift
+            QUERY_ARGS+=("$@")
+            break
+            ;;
+        --*)
+            echo "Unknown option: $1" >&2
+            usage >&2
+            exit 1
+            ;;
+        *)
+            QUERY_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+if [[ "$LIST_MODE" -eq 1 && ${#QUERY_ARGS[@]} -gt 0 ]]; then
+    die "--list does not take search terms"
+fi
+
+if [[ "$DO_UPDATE" -eq 1 ]]; then
+    command -v jq >/dev/null 2>&1 || die "--update requires jq (install with: brew install jq)"
     "$SCRIPT_DIR/session2md.sh"
-    shift
-    [[ $# -eq 0 ]] && exit 0
 fi
 
 INITIAL_QUERY=""
-if [[ "${1:-}" == "--list" ]]; then
+if [[ "$LIST_MODE" -eq 1 ]]; then
     INITIAL_QUERY=""
-elif [[ $# -gt 0 ]]; then
-    INITIAL_QUERY="$*"
+elif [[ ${#QUERY_ARGS[@]} -gt 0 ]]; then
+    INITIAL_QUERY="${QUERY_ARGS[*]}"
+elif [[ "$DO_UPDATE" -eq 1 ]]; then
+    exit 0
 else
-    echo "Usage: sg <search terms>"
-    echo "       sg --list"
-    echo "       sg --update [search terms]"
+    usage
     exit 1
 fi
 
 # ── Run search + fzf ───────────────────────────────────────────────────
 
+check_dependencies
+
+if ! compgen -G "$SESSION_DIR/*.md" > /dev/null; then
+    echo "No indexed sessions found."
+    echo "Run: sg --update"
+    exit 1
+fi
+
 # Get initial results (all sessions or pre-filtered)
 initial=$(bash "$HELPER" "$INITIAL_QUERY")
 
-if [[ -z "$initial" && -n "$INITIAL_QUERY" ]]; then
-    echo "No sessions found for: $INITIAL_QUERY"
+if [[ -z "$initial" ]]; then
+    if [[ -n "$INITIAL_QUERY" ]]; then
+        echo "No sessions found for: $INITIAL_QUERY"
+        echo "Tip: refresh the index with: sg --update"
+    else
+        echo "No indexed sessions found."
+        echo "Run: sg --update"
+    fi
     exit 1
 fi
 
@@ -94,7 +177,13 @@ if [[ -n "$project_dir" && -d "$project_dir" ]]; then
 fi
 
 if [[ "$agent" == "claude" ]]; then
+    command -v claude >/dev/null 2>&1 || die "claude CLI not found in PATH"
+    cleanup
+    trap - EXIT INT TERM
     exec claude --resume "$session_id"
 else
+    command -v codex >/dev/null 2>&1 || die "codex CLI not found in PATH"
+    cleanup
+    trap - EXIT INT TERM
     exec codex --resume "$session_id"
 fi
