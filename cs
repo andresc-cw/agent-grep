@@ -60,6 +60,7 @@ selected=$(echo "$results" | jq -r '
 
     # Extract frontmatter fields
     if [[ -f "$mdfile" ]]; then
+        project=$(sed -n 's/^project: *//p' "$mdfile" | head -1)
         project_name=$(sed -n 's/^project_name: *//p' "$mdfile" | head -1)
         date=$(sed -n 's/^date: *//p' "$mdfile" | head -1)
         slug=$(sed -n 's/^slug: *//p' "$mdfile" | head -1)
@@ -75,11 +76,11 @@ selected=$(echo "$results" | jq -r '
         display_name="${sid:0:12}..."
     fi
 
-    # Output tab-separated: session_id \t agent \t display line
-    printf '%s\t%s\t[%s] %-20s %s  %s\n' \
-        "$sid" "$agent" "$agent" "${project_name:-unknown}" "${short_date:-????-??-??}" "$display_name"
+    # Output tab-separated: session_id \t agent \t project_path \t display line
+    printf '%s\t%s\t%s\t[%s] %-20s %s  %s\n' \
+        "$sid" "$agent" "${project:-}" "$agent" "${project_name:-unknown}" "${short_date:-????-??-??}" "$display_name"
 done | fzf --delimiter=$'\t' \
-           --with-nth=3 \
+           --with-nth=4 \
            --preview="head -40 $SESSION_DIR/{2}-{1}.md" \
            --preview-window=right:50%:wrap \
            --header="Select a session to resume (Enter=open, Esc=cancel)" \
@@ -91,6 +92,12 @@ done | fzf --delimiter=$'\t' \
 
 session_id=$(echo "$selected" | cut -f1)
 agent=$(echo "$selected" | cut -f2)
+project_dir=$(echo "$selected" | cut -f3)
+
+# claude --resume is project-scoped: it only finds sessions for the cwd's project
+if [[ -n "$project_dir" && -d "$project_dir" ]]; then
+    cd "$project_dir"
+fi
 
 if [[ "$agent" == "claude" ]]; then
     exec claude --resume "$session_id"
