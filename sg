@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# cs — search Claude Code & Codex sessions, pick one with fzf, resume it
+# sg — search Claude Code & Codex sessions, pick one with fzf, resume it
 #
 # Usage:
-#   cs <search terms>          Search sessions and pick one to resume
-#   cs --list                  Browse all sessions, type to search content
-#   cs --update                Re-index sessions before searching
+#   sg<search terms>          Search sessions and pick one to resume
+#   sg--list                  Browse all sessions, type to search content
+#   sg--update                Re-index sessions before searching
 
 SESSION_DIR="$HOME/.cache/agent-grep/sessions"
 # Resolve symlinks so SCRIPT_DIR points to the repo, not the symlink location
@@ -20,9 +20,9 @@ SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
 # Uses rg for content search + gawk for fast frontmatter formatting.
 # gawk is required (macOS /usr/bin/awk lacks ENDFILE): brew install gawk
 
-AWK_FMT="$SCRIPT_DIR/.cs_fmt.awk"
+AWK_FMT="$SCRIPT_DIR/.sg_fmt.awk"
 
-HELPER=$(mktemp "${TMPDIR:-/tmp}/cs-helper.XXXXX")
+HELPER=$(mktemp "${TMPDIR:-/tmp}/sg-helper.XXXXX")
 trap 'rm -f "$HELPER"' EXIT
 
 cat > "$HELPER" << HELPEREOF
@@ -53,9 +53,9 @@ if [[ "${1:-}" == "--list" ]]; then
 elif [[ $# -gt 0 ]]; then
     INITIAL_QUERY="$*"
 else
-    echo "Usage: cs <search terms>"
-    echo "       cs --list"
-    echo "       cs --update [search terms]"
+    echo "Usage: sg <search terms>"
+    echo "       sg--list"
+    echo "       sg--update [search terms]"
     exit 1
 fi
 

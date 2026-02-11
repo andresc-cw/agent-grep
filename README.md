@@ -7,9 +7,9 @@ Type a few words about what you discussed, pick the session from a list, and you
 ## Usage
 
 ```bash
-cs "billing bug"     # search session content, pick one, resume it
-cs --list            # browse all sessions, type to filter by content
-cs --update          # re-index before searching
+sg"billing bug"     # search session content, pick one, resume it
+sg--list            # browse all sessions, type to filter by content
+sg--update          # re-index before searching
 ```
 
 ## Architecture
@@ -24,7 +24,7 @@ cs --update          # re-index before searching
                                                                 │
                 ┌───────────────────────────────────────────────┘
                 │
-          cs <query>                          cs --list
+          sg<query>                          sg--list
                 │                                  │
                 ▼                                  ▼
        rg: find sessions                  gawk: read all
@@ -72,7 +72,7 @@ bun install -g github:tobi/qmd
 # 2. Clone and symlink
 git clone https://github.com/andresc-cw/agent-grep.git
 cd agent-grep
-ln -s "$(pwd)/cs" ~/.local/bin/cs
+ln -s "$(pwd)/sg" ~/.local/bin/sg
 
 # 3. Initial index
 ./session2md.sh                                              # convert sessions
@@ -105,7 +105,7 @@ launchctl load ~/Library/LaunchAgents/com.agent-grep.session2md.plist
 
 | File | Purpose |
 |------|---------|
-| `cs` | Search + fzf picker + auto-resume |
+| `sg` | Search + fzf picker + auto-resume |
 | `session2md.sh` | JSONL to markdown converter (bash + jq) |
-| `.cs_fmt.awk` | gawk program for fast frontmatter extraction |
+| `.sg_fmt.awk` | gawk program for fast frontmatter extraction |
 | `com.agent-grep.session2md.plist` | launchd plist for background indexing |
