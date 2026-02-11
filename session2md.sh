@@ -106,7 +106,7 @@ agent: codex
 project: ${cwd:-unknown}
 project_name: ${project:-unknown}
 date: ${date:-unknown}
-resume: codex --resume ${id}
+resume: codex resume ${id}
 ---
 
 # codex-${id}

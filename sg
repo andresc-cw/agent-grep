@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# sg — search Claude Code & Codex sessions, pick one with fzf, resume it
+# sg - search Claude Code & Codex sessions, pick one with fzf, resume it
 #
 # Usage:
+#   sg                         Browse all sessions, type to search content
 #   sg <search terms>         Search sessions and pick one to resume
 #   sg --list                 Browse all sessions, type to search content
 #   sg --update [search terms] Re-index sessions before searching
@@ -14,7 +15,7 @@ SELF="$0"
 [[ -L "$SELF" ]] && SELF="$(readlink "$SELF")"
 SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
 
-# ── Search helper ───────────────────────────────────────────────────────
+# -- Search helper -------------------------------------------------------
 #
 # Written to a temp file so fzf's change:reload can call it.
 # Uses rg for content search + gawk for fast frontmatter formatting.
@@ -23,11 +24,33 @@ SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
 AWK_FMT="$SCRIPT_DIR/.sg_fmt.awk"
 
 usage() {
-    cat <<EOF
-Usage: sg <search terms>
-       sg --list
-       sg --update [search terms]
-       sg --help
+    cat <<'EOF'
+sg - Search and resume Claude Code and Codex sessions.
+
+Usage:
+  sg
+  sg <search terms>
+  sg --list
+  sg --update [search terms]
+  sg --help
+
+What it does:
+  - Reads a local index of session transcripts in ~/.cache/agent-grep/sessions
+  - Opens an interactive picker for searching and previewing sessions
+  - Resumes the selected session with claude --resume or codex resume
+
+Notes:
+  - Running sg with no arguments opens browse mode (same as --list)
+  - If no index exists, sg can prompt to run indexing for you
+
+Examples:
+  sg "billing timeout"
+  sg --list
+  sg --update
+  sg --update "auth bug"
+
+Dependencies:
+  rg, gawk, fzf (and jq for --update)
 EOF
 }
 
@@ -45,6 +68,43 @@ check_dependencies() {
 
     if [[ ${#missing[@]} -gt 0 ]]; then
         die "missing dependencies: ${missing[*]} (install with: brew install ripgrep gawk fzf)"
+    fi
+}
+
+ensure_index() {
+    if compgen -G "$SESSION_DIR/*.md" > /dev/null; then
+        return 0
+    fi
+
+    echo "No indexed sessions found."
+
+    # Prompt only when attached to a TTY; otherwise keep the current non-interactive behavior.
+    if [[ ! -t 0 || ! -t 1 ]]; then
+        echo "Run: sg --update"
+        return 1
+    fi
+
+    printf "Run session indexing now? [Y/n] "
+    local answer
+    if ! IFS= read -r answer; then
+        answer="n"
+    fi
+
+    case "$answer" in
+        ""|[Yy]|[Yy][Ee][Ss])
+            command -v jq >/dev/null 2>&1 || die "indexing requires jq (install with: brew install jq)"
+            "$SCRIPT_DIR/session2md.sh"
+            ;;
+        *)
+            echo "Run: sg --update"
+            return 1
+            ;;
+    esac
+
+    if ! compgen -G "$SESSION_DIR/*.md" > /dev/null; then
+        echo "No sessions were indexed."
+        echo "Run: sg --update --full"
+        return 1
     fi
 }
 
@@ -70,7 +130,7 @@ fi
 HELPEREOF
 chmod +x "$HELPER"
 
-# ── Handle flags ────────────────────────────────────────────────────────
+# -- Handle flags --------------------------------------------------------
 
 DO_UPDATE=0
 LIST_MODE=0
@@ -111,6 +171,10 @@ if [[ "$LIST_MODE" -eq 1 && ${#QUERY_ARGS[@]} -gt 0 ]]; then
     die "--list does not take search terms"
 fi
 
+if [[ "$LIST_MODE" -eq 0 && "$DO_UPDATE" -eq 0 && ${#QUERY_ARGS[@]} -eq 0 ]]; then
+    LIST_MODE=1
+fi
+
 if [[ "$DO_UPDATE" -eq 1 ]]; then
     command -v jq >/dev/null 2>&1 || die "--update requires jq (install with: brew install jq)"
     "$SCRIPT_DIR/session2md.sh"
@@ -128,13 +192,11 @@ else
     exit 1
 fi
 
-# ── Run search + fzf ───────────────────────────────────────────────────
+# -- Run search + fzf ----------------------------------------------------
 
 check_dependencies
 
-if ! compgen -G "$SESSION_DIR/*.md" > /dev/null; then
-    echo "No indexed sessions found."
-    echo "Run: sg --update"
+if ! ensure_index; then
     exit 1
 fi
 
@@ -165,7 +227,7 @@ selected=$(echo "$initial" | fzf \
 
 [[ -z "$selected" ]] && exit 0
 
-# ── Extract and resume ──────────────────────────────────────────────────
+# -- Extract and resume --------------------------------------------------
 
 session_id=$(echo "$selected" | cut -f1)
 agent=$(echo "$selected" | cut -f2)
@@ -185,5 +247,5 @@ else
     command -v codex >/dev/null 2>&1 || die "codex CLI not found in PATH"
     cleanup
     trap - EXIT INT TERM
-    exec codex --resume "$session_id"
+    exec codex resume "$session_id"
 fi

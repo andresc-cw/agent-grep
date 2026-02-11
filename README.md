@@ -43,7 +43,7 @@ sg --update         # re-index before searching
                            ▼
                      cd <project dir>
                      claude --resume <id>
-                     (or codex --resume)
+                     (or codex resume <id>)
 ```
 
 Each JSONL session is converted to a markdown file with YAML frontmatter (session ID, project, date, slug) and the full conversation text. The markdown files serve as the search corpus for both `qmd` (ranked search) and `rg` (live content filtering).
