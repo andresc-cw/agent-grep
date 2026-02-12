@@ -20,62 +20,65 @@ Inside the picker, press `Alt-d` to toggle date sorting on/off.
 
 ```
 ~/.claude/projects/**/*.jsonl ─┐
-                               ├── session2md.sh ──► ~/.cache/agent-grep/sessions/*.md
-~/.codex/sessions/**/*.jsonl ──┘       (jq)                     │
-                                                                │
-                       launchd runs session2md.sh
-                       every 5 min to keep fresh
-                                │
-                ┌───────────────┘
-                │
-          sg<query>                          sg--list
-                │                                  │
-                ▼                                  ▼
-sqlite fts5 rank (fallback rg)            gawk: read all
-       matching sessions                   frontmatters
-                │                                  │
-                └──────────┬───────────────────────┘
-                           ▼
-                    ┌─────────────┐
-                    │     fzf     │
-                    │             │
-                    │  type ──► fts5+gawk (fallback rg)
-                    │  preview ──► head    (session preview)
-                    │             │
-                    └──────┬──────┘
-                           │ Enter
-                           ▼
-                     cd <project dir>
-                     claude --resume <id>
-                     (or codex resume <id>)
+                               ├── session2md.sh (jq) ──► ~/.cache/agent-grep/sessions/*.md
+~/.codex/sessions/**/*.jsonl ──┘                         │
+                                                         ├── .sg_idx.awk + sqlite3
+                                                         │         └── ~/.cache/agent-grep/sessions.sqlite (FTS5)
+                                                         │
+                       launchd (optional, every 5 min) ─┘
+
+sg [query] [--repo <repo>] [--sort-date]
+   │
+   ├── helper script
+   │     ├── SQLite FTS5 ranked path lookup (bm25)
+   │     ├── fallback: rg -l path lookup (if sqlite3/db unavailable)
+   │     ├── gawk (.sg_fmt.awk) frontmatter formatting
+   │     └── repo filter + date-sort toggle state
+   │
+   └── fzf picker (live reload + preview)
+           └── Enter: cd <project> && resume command from frontmatter
 ```
 
-Each JSONL session is converted to markdown with YAML frontmatter (session ID, project, date, slug) and the full conversation text. `session2md.sh` also maintains a local SQLite FTS5 index for ranked search. If `sqlite3` is unavailable, `sg` falls back to `rg` search.
+Each JSONL session is converted to markdown with YAML frontmatter (session ID, project, date, slug, resume command) and conversation text. `session2md.sh` also maintains a local SQLite FTS5 index for ranked search, and `sg` uses `rg` fallback when `sqlite3` is unavailable.
+
+Current indexing behavior: any detected transcript change triggers an FTS rebuild over all indexed markdown files.
 
 ## Performance
 
-Benchmarked on 610 sessions (496 Claude Code + 114 Codex), 6.2 MB total on an M1 Mac.
+Benchmarked on February 12, 2026 on an M1 Mac with:
+- 646 indexed markdown sessions (`~/.cache/agent-grep/sessions`, 8.0 MB)
+- 15 MB SQLite FTS database (`~/.cache/agent-grep/sessions.sqlite`)
+
+List/search timings are mean wall-clock over 40 runs; indexing timings are single-run end-to-end measurements.
 
 | Operation | Time | How |
 |-----------|------|-----|
-| **List all 610 sessions** | **0.16s** | Single `gawk` pass reads all frontmatters |
-| **Content search (broad, 342 hits)** | **0.14s** | `rg` parallel grep + `gawk` format |
-| **Content search (narrow, 5 hits)** | **0.06s** | `rg` + `gawk` on few files |
-| **Incremental re-index (2 changed)** | **~1s** | `session2md.sh` skips unchanged files |
-| **Full re-index (610 sessions)** | **~45s** | One-time `jq` conversion of all JSONL |
+| **List all indexed sessions** | **0.11s** | `gawk` reads frontmatter from all markdown files |
+| **FTS search (broad, `billing`, 354 hits)** | **0.10s** | SQLite FTS5 ranked lookup + `gawk` formatting |
+| **FTS search (narrow, `launchctl`, 2 hits)** | **0.03s** | SQLite FTS5 ranked lookup + `gawk` formatting |
+| **Fallback search (broad, `billing`)** | **0.13s** | `rg -l` path lookup + `gawk` formatting |
+| **Incremental re-index (2 changed)** | **33.5s** | Re-convert changed JSONL + full FTS rebuild |
+| **Full re-index (`--full`)** | **78.4s** | Re-convert all source sessions + full FTS rebuild |
 
-Live content search runs on every keystroke via fzf's `--disabled` + `change:reload`, using SQLite FTS5 ranking when available with `rg` fallback. Feels instant.
+Live content search in `fzf` uses `change:reload` with SQLite FTS5 ranking when available, with `rg` fallback.
 
 ## Install
 
 ```bash
-# 1. Dependencies
+# 1. Dependencies (macOS)
 brew install jq fzf gawk ripgrep
+# sqlite3 is preinstalled on macOS; verify:
+sqlite3 --version
+
+# Ubuntu/Debian
+# sudo apt-get install -y jq fzf gawk ripgrep sqlite3
 
 # 2. Clone and symlink
 git clone https://github.com/andresc-cw/agent-grep.git
 cd agent-grep
-ln -s "$(pwd)/sg" ~/.local/bin/sg
+mkdir -p ~/.local/bin
+ln -sfn "$(pwd)/sg" ~/.local/bin/sg
+# ensure ~/.local/bin is on PATH in your shell config
 
 # 3. Initial index
 ./session2md.sh
