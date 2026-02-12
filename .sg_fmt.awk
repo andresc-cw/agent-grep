@@ -26,5 +26,5 @@ ENDFILE {
   if (agent=="claude") tag=claude_tag
   else if (agent=="codex") tag=codex_tag
   if (agent=="claude" && slug!="" && slug!="untitled") dn=slug; else dn=substr(sid,1,12)"..."
-  printf "%s\t%s\t%s\t%s\t%s\t%s %-20s %s  %s\n", sid, agent, proj, pname, dt_sort, tag, pname, dt_show, dn
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s %-20s %s  %s\n", sid, agent, proj, pname, dt_sort, FILENAME, tag, pname, dt_show, dn
 }

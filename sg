@@ -136,6 +136,12 @@ AWK_FMT="${SG_AWK_FMT:?missing SG_AWK_FMT}"
 FTS_DB="${SG_FTS_DB:-}"
 REPO_FILTER="${SG_REPO_FILTER:-}"
 SORT_STATE_FILE="${SG_SORT_STATE:-}"
+SCORE_MAP_FILE=""
+
+cleanup_score_map() {
+    [[ -n "$SCORE_MAP_FILE" && -f "$SCORE_MAP_FILE" ]] && rm -f "$SCORE_MAP_FILE"
+}
+trap cleanup_score_map EXIT
 
 sql_quote() {
     printf "%s" "$1" | sed "s/'/''/g"
@@ -178,16 +184,94 @@ search_ranked_paths() {
     fi
 
     sql=$(cat <<SQL
-SELECT path
+SELECT path, bm25(sessions_fts, 8.0, 4.0, 1.0) AS raw_score
 FROM sessions_fts
 WHERE sessions_fts MATCH '$q_fts'
 $repo_clause
-ORDER BY bm25(sessions_fts, 8.0, 4.0, 1.0), date DESC
+ORDER BY raw_score, date DESC
 LIMIT 400;
 SQL
 )
 
-    sqlite3 -noheader "$FTS_DB" "$sql" 2>/dev/null || true
+    sqlite3 -noheader -separator $'\t' "$FTS_DB" "$sql" 2>/dev/null || true
+}
+
+search_fallback_paths() {
+    local raw_query="$1"
+
+    rg -i -H --count-matches --no-messages -- "$raw_query" "$SESSION_DIR"/*.md 2>/dev/null \
+        | gawk -F: '
+            {
+                path = $0
+                sub(/:[0-9]+$/, "", path)
+                count = $0
+                sub(/^.*:/, "", count)
+                if ((count + 0) > 0) print path "\t" count
+            }
+        ' \
+        | sort -t $'\t' -k2,2nr -k1,1
+}
+
+normalize_scores() {
+    local mode="$1"
+    gawk -F $'\t' -v mode="$mode" '
+        NF >= 1 {
+            path = $1
+            if (path == "") next
+
+            raw = 0.0
+            if (NF >= 2 && $2 != "") raw = $2 + 0.0
+
+            paths[++n] = path
+            vals[n] = raw
+            if (n == 1 || raw < min) min = raw
+            if (n == 1 || raw > max) max = raw
+        }
+        END {
+            for (i = 1; i <= n; i++) {
+                if (max == min) score = 100
+                else if (mode == "lower_better") score = 1 + ((max - vals[i]) / (max - min)) * 99
+                else score = 1 + ((vals[i] - min) / (max - min)) * 99
+
+                if (score < 1) score = 1
+                if (score > 100) score = 100
+                printf "%s\t%.0f\n", paths[i], score
+            }
+        }
+    '
+}
+
+append_scores_to_rows() {
+    local score_file="$1"
+    gawk -F $'\t' -v OFS=$'\t' -v score_file="$score_file" '
+        BEGIN {
+            while ((getline line < score_file) > 0) {
+                split(line, parts, "\t")
+                if (parts[1] != "" && parts[2] != "") score[parts[1]] = parts[2]
+            }
+            close(score_file)
+        }
+        {
+            score_txt = "n/a"
+            if ($6 in score) score_txt = sprintf("%3s/100", score[$6])
+            $7 = sprintf("[score:%s] %s", score_txt, $7)
+            print
+        }
+    '
+}
+
+format_rows_for_matches() {
+    local matches="$1"
+    local files=()
+    local path
+
+    while IFS=$'\t' read -r path _; do
+        [[ -z "$path" ]] && continue
+        files+=("$path")
+    done < <(printf '%s\n' "$matches")
+
+    [[ ${#files[@]} -eq 0 ]] && return 0
+    gawk -f "$AWK_FMT" "${files[@]}" 2>/dev/null || true
 }
 
 if [[ "${1-}" == "--toggle-sort" ]]; then
@@ -211,14 +295,22 @@ if [[ -z "$QUERY" ]]; then
     rows=$(gawk -f "$AWK_FMT" "$SESSION_DIR"/*.md 2>/dev/null || true)
 else
     matches=""
+    score_mode=""
     if [[ -n "$FTS_DB" && -f "$FTS_DB" ]] && command -v sqlite3 >/dev/null 2>&1; then
         matches=$(search_ranked_paths "$QUERY")
+        [[ -n "$matches" ]] && score_mode="lower_better"
     fi
     if [[ -z "$matches" ]]; then
-        matches=$(rg -l --no-messages -i -- "$QUERY" "$SESSION_DIR"/*.md || true)
+        matches=$(search_fallback_paths "$QUERY" || true)
+        [[ -n "$matches" ]] && score_mode="higher_better"
     fi
     if [[ -n "$matches" ]]; then
-        rows=$(echo "$matches" | xargs gawk -f "$AWK_FMT" 2>/dev/null || true)
+        rows=$(format_rows_for_matches "$matches")
+        if [[ -n "$rows" ]]; then
+            SCORE_MAP_FILE=$(mktemp "${TMPDIR:-/tmp}/sg-score.XXXXX")
+            printf '%s\n' "$matches" | normalize_scores "$score_mode" > "$SCORE_MAP_FILE"
+            rows=$(printf '%s\n' "$rows" | append_scores_to_rows "$SCORE_MAP_FILE")
+        fi
     else
         rows=""
     fi
@@ -369,7 +461,7 @@ if [[ -z "$initial" ]]; then
     exit 1
 fi
 
-FZF_HEADER="Type to search session content (Enter=open, Alt-d=toggle date sort, Esc=cancel)"
+FZF_HEADER="Type to search session content (Enter=open, Alt-d=toggle date sort, Esc=cancel) | score = relative relevance (1-100, 100=best)"
 if [[ -n "$REPO_FILTER" ]]; then
     FZF_HEADER="Repo filter: $REPO_FILTER | $FZF_HEADER"
 fi
@@ -382,8 +474,8 @@ selected=$(echo "$initial" | fzf \
     --bind "change:reload(bash '$HELPER' {q})" \
     --bind "alt-d:execute-silent(bash '$HELPER' --toggle-sort)+reload(bash '$HELPER' {q})" \
     --delimiter=$'\t' \
-    --with-nth=6 \
-    --preview="head -50 '$SESSION_DIR'/{2}-{1}.md" \
+    --with-nth=7 \
+    --preview="head -50 {6}" \
     --preview-window=right:50%:wrap \
     --header="$FZF_HEADER")
 

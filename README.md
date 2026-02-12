@@ -15,6 +15,7 @@ sg --update         # re-index before searching
 ```
 
 Inside the picker, press `Alt-d` to toggle date sorting on/off.
+When you type a query, each row shows `[score:NNN/100]` (relative relevance for the current query; higher is better).
 
 ## Architecture
 
