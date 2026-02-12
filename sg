@@ -7,9 +7,11 @@ set -euo pipefail
 #   sg                         Browse all sessions, type to search content
 #   sg <search terms>         Search sessions and pick one to resume
 #   sg --list                 Browse all sessions, type to search content
+#   sg --repo <repo> [terms]  Filter sessions by repo/project + optional content query
 #   sg --update [search terms] Re-index sessions before searching
 
 SESSION_DIR="$HOME/.cache/agent-grep/sessions"
+FTS_DB="$HOME/.cache/agent-grep/sessions.sqlite"
 # Resolve symlinks so SCRIPT_DIR points to the repo, not the symlink location
 SELF="$0"
 [[ -L "$SELF" ]] && SELF="$(readlink "$SELF")"
@@ -18,7 +20,7 @@ SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
 # -- Search helper -------------------------------------------------------
 #
 # Written to a temp file so fzf's change:reload can call it.
-# Uses rg for content search + gawk for fast frontmatter formatting.
+# Uses sqlite FTS5 for ranked search when available, with rg fallback.
 # gawk is required (macOS /usr/bin/awk lacks ENDFILE): brew install gawk
 
 AWK_FMT="$SCRIPT_DIR/.sg_fmt.awk"
@@ -31,6 +33,9 @@ Usage:
   sg
   sg <search terms>
   sg --list
+  sg --repo <repo> [search terms]
+  sg --list --repo <repo>
+  sg --sort-date [search terms]
   sg --update [search terms]
   sg --help
 
@@ -42,15 +47,19 @@ What it does:
 Notes:
   - Running sg with no arguments opens browse mode (same as --list)
   - If no index exists, sg can prompt to run indexing for you
+  - In the picker, press Alt-d to toggle date sorting on/off
 
 Examples:
   sg "billing timeout"
   sg --list
+  sg --repo billing
+  sg --repo billing "retry policy"
+  sg --sort-date --list
   sg --update
   sg --update "auth bug"
 
 Dependencies:
-  rg, gawk, fzf (and jq for --update)
+  rg, gawk, fzf (jq for --update; sqlite3 recommended for ranked search)
 EOF
 }
 
@@ -111,21 +120,132 @@ ensure_index() {
 [[ -f "$AWK_FMT" ]] || die "formatter not found: $AWK_FMT"
 
 HELPER=$(mktemp "${TMPDIR:-/tmp}/sg-helper.XXXXX")
+SORT_STATE=""
 cleanup() {
     rm -f "$HELPER"
+    [[ -n "$SORT_STATE" ]] && rm -f "$SORT_STATE"
 }
 trap cleanup EXIT INT TERM
 
-cat > "$HELPER" << HELPEREOF
+cat > "$HELPER" << 'HELPEREOF'
 #!/usr/bin/env bash
-QUERY="\$1"
-if [[ -z "\$QUERY" ]]; then
-    gawk -f "$AWK_FMT" "$SESSION_DIR"/*.md 2>/dev/null
-else
-    matches=\$(rg -l --no-messages -i -- "\$QUERY" "$SESSION_DIR"/*.md)
-    if [[ -n "\$matches" ]]; then
-        echo "\$matches" | xargs gawk -f "$AWK_FMT" 2>/dev/null
+set -euo pipefail
+
+SESSION_DIR="${SG_SESSION_DIR:?missing SG_SESSION_DIR}"
+AWK_FMT="${SG_AWK_FMT:?missing SG_AWK_FMT}"
+FTS_DB="${SG_FTS_DB:-}"
+REPO_FILTER="${SG_REPO_FILTER:-}"
+SORT_STATE_FILE="${SG_SORT_STATE:-}"
+
+sql_quote() {
+    printf "%s" "$1" | sed "s/'/''/g"
+}
+
+to_fts_query() {
+    local input="$1" token=""
+    local parts=()
+
+    while IFS= read -r token; do
+        [[ -z "$token" ]] && continue
+        parts+=("\"$token\"*")
+    done < <(printf '%s' "$input" | tr '[:upper:]' '[:lower:]' | tr -cs '[:alnum:]_-' '\n')
+
+    [[ ${#parts[@]} -eq 0 ]] && return 0
+
+    local query=""
+    local term
+    for term in "${parts[@]}"; do
+        if [[ -z "$query" ]]; then
+            query="$term"
+        else
+            query="$query AND $term"
+        fi
+    done
+    printf '%s\n' "$query"
+}
+
+search_ranked_paths() {
+    local raw_query="$1" fts_query q_fts sql
+    local repo_clause="" q_repo=""
+
+    fts_query=$(to_fts_query "$raw_query")
+    [[ -z "$fts_query" ]] && return 0
+
+    q_fts=$(sql_quote "$fts_query")
+    if [[ -n "$REPO_FILTER" ]]; then
+        q_repo=$(sql_quote "$(printf '%s' "$REPO_FILTER" | tr '[:upper:]' '[:lower:]')")
+        repo_clause="AND (instr(lower(project), '$q_repo') > 0 OR instr(lower(project_name), '$q_repo') > 0)"
     fi
+
+    sql=$(cat <<SQL
+SELECT path
+FROM sessions_fts
+WHERE sessions_fts MATCH '$q_fts'
+$repo_clause
+ORDER BY bm25(sessions_fts, 8.0, 4.0, 1.0), date DESC
+LIMIT 400;
+SQL
+)
+
+    sqlite3 -noheader "$FTS_DB" "$sql" 2>/dev/null || true
+}
+
+if [[ "${1-}" == "--toggle-sort" ]]; then
+    if [[ -z "$SORT_STATE_FILE" ]]; then
+        exit 0
+    fi
+    current="default"
+    if [[ -f "$SORT_STATE_FILE" ]]; then
+        current=$(cat "$SORT_STATE_FILE" 2>/dev/null || echo "default")
+    fi
+    if [[ "$current" == "date" ]]; then
+        printf "default\n" > "$SORT_STATE_FILE"
+    else
+        printf "date\n" > "$SORT_STATE_FILE"
+    fi
+    exit 0
+fi
+
+QUERY="${1-}"
+if [[ -z "$QUERY" ]]; then
+    rows=$(gawk -f "$AWK_FMT" "$SESSION_DIR"/*.md 2>/dev/null || true)
+else
+    matches=""
+    if [[ -n "$FTS_DB" && -f "$FTS_DB" ]] && command -v sqlite3 >/dev/null 2>&1; then
+        matches=$(search_ranked_paths "$QUERY")
+    fi
+    if [[ -z "$matches" ]]; then
+        matches=$(rg -l --no-messages -i -- "$QUERY" "$SESSION_DIR"/*.md || true)
+    fi
+    if [[ -n "$matches" ]]; then
+        rows=$(echo "$matches" | xargs gawk -f "$AWK_FMT" 2>/dev/null || true)
+    else
+        rows=""
+    fi
+fi
+
+[[ -z "$rows" ]] && exit 0
+
+if [[ -n "$REPO_FILTER" ]]; then
+    rows=$(printf '%s\n' "$rows" | gawk -F $'\t' -v repo="$REPO_FILTER" '
+        BEGIN { needle = tolower(repo) }
+        {
+            if (index(tolower($3), needle) || index(tolower($4), needle)) print
+        }
+    ')
+fi
+
+[[ -z "$rows" ]] && exit 0
+
+sort_mode="default"
+if [[ -n "$SORT_STATE_FILE" && -f "$SORT_STATE_FILE" ]]; then
+    sort_mode=$(cat "$SORT_STATE_FILE" 2>/dev/null || echo "default")
+fi
+
+if [[ "$sort_mode" == "date" ]]; then
+    printf '%s\n' "$rows" | sort -t $'\t' -k5,5r -k1,1
+else
+    printf '%s\n' "$rows"
 fi
 HELPEREOF
 chmod +x "$HELPER"
@@ -134,6 +254,8 @@ chmod +x "$HELPER"
 
 DO_UPDATE=0
 LIST_MODE=0
+REPO_FILTER=""
+SORT_MODE="default"
 QUERY_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -148,6 +270,22 @@ while [[ $# -gt 0 ]]; do
             ;;
         --list)
             LIST_MODE=1
+            shift
+            ;;
+        --repo|-r)
+            shift
+            [[ $# -gt 0 ]] || die "--repo requires a value"
+            REPO_FILTER="$1"
+            [[ -n "$REPO_FILTER" ]] || die "--repo requires a non-empty value"
+            shift
+            ;;
+        --repo=*)
+            REPO_FILTER="${1#*=}"
+            [[ -n "$REPO_FILTER" ]] || die "--repo requires a non-empty value"
+            shift
+            ;;
+        --sort-date|--date-sort)
+            SORT_MODE="date"
             shift
             ;;
         --)
@@ -171,8 +309,10 @@ if [[ "$LIST_MODE" -eq 1 && ${#QUERY_ARGS[@]} -gt 0 ]]; then
     die "--list does not take search terms"
 fi
 
-if [[ "$LIST_MODE" -eq 0 && "$DO_UPDATE" -eq 0 && ${#QUERY_ARGS[@]} -eq 0 ]]; then
-    LIST_MODE=1
+if [[ "$LIST_MODE" -eq 0 && ${#QUERY_ARGS[@]} -eq 0 ]]; then
+    if [[ "$DO_UPDATE" -eq 0 || -n "$REPO_FILTER" || "$SORT_MODE" == "date" ]]; then
+        LIST_MODE=1
+    fi
 fi
 
 if [[ "$DO_UPDATE" -eq 1 ]]; then
@@ -200,12 +340,27 @@ if ! ensure_index; then
     exit 1
 fi
 
+SORT_STATE=$(mktemp "${TMPDIR:-/tmp}/sg-sort.XXXXX")
+printf '%s\n' "$SORT_MODE" > "$SORT_STATE"
+
+export SG_SESSION_DIR="$SESSION_DIR"
+export SG_AWK_FMT="$AWK_FMT"
+export SG_FTS_DB="$FTS_DB"
+export SG_REPO_FILTER="$REPO_FILTER"
+export SG_SORT_STATE="$SORT_STATE"
+
 # Get initial results (all sessions or pre-filtered)
 initial=$(bash "$HELPER" "$INITIAL_QUERY")
 
 if [[ -z "$initial" ]]; then
-    if [[ -n "$INITIAL_QUERY" ]]; then
-        echo "No sessions found for: $INITIAL_QUERY"
+    if [[ -n "$INITIAL_QUERY" && -n "$REPO_FILTER" ]]; then
+        echo "No sessions found for query '$INITIAL_QUERY' with repo filter '$REPO_FILTER'."
+        echo "Tip: refresh the index with: sg --update"
+    elif [[ -n "$INITIAL_QUERY" ]]; then
+        echo "No sessions found for query: $INITIAL_QUERY"
+        echo "Tip: try --repo <repo> to filter by project, or refresh with: sg --update"
+    elif [[ -n "$REPO_FILTER" ]]; then
+        echo "No sessions found for repo filter: $REPO_FILTER"
         echo "Tip: refresh the index with: sg --update"
     else
         echo "No indexed sessions found."
@@ -214,16 +369,23 @@ if [[ -z "$initial" ]]; then
     exit 1
 fi
 
-# fzf with live content search: typing re-runs rg across session files
+FZF_HEADER="Type to search session content (Enter=open, Alt-d=toggle date sort, Esc=cancel)"
+if [[ -n "$REPO_FILTER" ]]; then
+    FZF_HEADER="Repo filter: $REPO_FILTER | $FZF_HEADER"
+fi
+
+# fzf with live content search: typing re-runs ranked retrieval via helper
 selected=$(echo "$initial" | fzf \
+    --ansi \
     --disabled \
     --query "$INITIAL_QUERY" \
-    --bind "change:reload:bash '$HELPER' {q}" \
+    --bind "change:reload(bash '$HELPER' {q})" \
+    --bind "alt-d:execute-silent(bash '$HELPER' --toggle-sort)+reload(bash '$HELPER' {q})" \
     --delimiter=$'\t' \
-    --with-nth=4 \
+    --with-nth=6 \
     --preview="head -50 '$SESSION_DIR'/{2}-{1}.md" \
     --preview-window=right:50%:wrap \
-    --header="Type to search session content (Enter=open, Esc=cancel)")
+    --header="$FZF_HEADER")
 
 [[ -z "$selected" ]] && exit 0
 

@@ -4,6 +4,9 @@ set -euo pipefail
 OUT_DIR="$HOME/.cache/agent-grep/sessions"
 CLAUDE_DIR="$HOME/.claude/projects"
 CODEX_DIR="$HOME/.codex/sessions"
+FTS_DB="$HOME/.cache/agent-grep/sessions.sqlite"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+FTS_FMT="$SCRIPT_DIR/.sg_idx.awk"
 
 FULL=""
 STATS_ONLY=""
@@ -21,6 +24,75 @@ mkdir -p "$OUT_DIR"
 # Counters
 claude_total=0; claude_converted=0; claude_skipped=0
 codex_total=0;  codex_converted=0;  codex_skipped=0
+
+# SQL single-quote escaping for sqlite string literals.
+sql_quote() {
+    printf "%s" "$1" | sed "s/'/''/g"
+}
+
+rebuild_fts_index() {
+    command -v sqlite3 >/dev/null 2>&1 || return 0
+    [[ -f "$FTS_FMT" ]] || return 0
+
+    local files=()
+    shopt -s nullglob
+    files=("$OUT_DIR"/*.md)
+    shopt -u nullglob
+
+    if [[ ${#files[@]} -eq 0 ]]; then
+        rm -f "$FTS_DB"
+        return 0
+    fi
+
+    local tmp_db="${FTS_DB}.tmp"
+    local sql_file="${FTS_DB}.sql"
+    rm -f "$tmp_db" "$sql_file"
+
+    {
+        cat <<'SQL'
+PRAGMA journal_mode=OFF;
+PRAGMA synchronous=OFF;
+PRAGMA temp_store=MEMORY;
+CREATE VIRTUAL TABLE sessions_fts USING fts5(
+    path UNINDEXED,
+    session_id UNINDEXED,
+    agent UNINDEXED,
+    project UNINDEXED,
+    project_name,
+    date UNINDEXED,
+    slug,
+    body,
+    tokenize='unicode61 remove_diacritics 2 tokenchars ''-_''',
+    prefix='2 3 4'
+);
+BEGIN;
+SQL
+
+        gawk -f "$FTS_FMT" "${files[@]}" | while IFS=$'\t' read -r path sid agent project pname date slug; do
+            local q_path q_sid q_agent q_project q_pname q_date q_slug
+            q_path=$(sql_quote "$path")
+            q_sid=$(sql_quote "$sid")
+            q_agent=$(sql_quote "$agent")
+            q_project=$(sql_quote "$project")
+            q_pname=$(sql_quote "$pname")
+            q_date=$(sql_quote "$date")
+            q_slug=$(sql_quote "$slug")
+
+            printf "INSERT INTO sessions_fts(path,session_id,agent,project,project_name,date,slug,body) "
+            printf "VALUES('%s','%s','%s','%s','%s','%s','%s',CAST(readfile('%s') AS TEXT));\n" \
+                "$q_path" "$q_sid" "$q_agent" "$q_project" "$q_pname" "$q_date" "$q_slug" "$q_path"
+        done
+
+        echo "COMMIT;"
+    } > "$sql_file"
+
+    if sqlite3 "$tmp_db" < "$sql_file" >/dev/null 2>&1; then
+        mv "$tmp_db" "$FTS_DB"
+        echo "FTS:   indexed ${#files[@]} sessions"
+    fi
+
+    rm -f "$tmp_db" "$sql_file"
+}
 
 # ── Claude Code conversion ──────────────────────────────────────────────
 
@@ -186,8 +258,20 @@ else
     echo "Claude: ${claude_converted} converted, ${claude_skipped} skipped (${claude_total} total)"
     echo "Codex:  ${codex_converted} converted, ${codex_skipped} skipped (${codex_total} total)"
 
-    # Re-index qmd sessions collection if any files were converted
-    if [[ $((claude_converted + codex_converted)) -gt 0 ]] && command -v qmd &>/dev/null; then
-        qmd collection add "$OUT_DIR" --name sessions 2>&1 || true
+    if command -v sqlite3 >/dev/null 2>&1 && [[ -f "$FTS_FMT" ]]; then
+        needs_fts=0
+        if [[ $((claude_converted + codex_converted)) -gt 0 ]]; then
+            needs_fts=1
+        elif [[ ! -f "$FTS_DB" ]]; then
+            needs_fts=1
+        elif ! sqlite3 "$FTS_DB" "SELECT 1 FROM sessions_fts LIMIT 1;" >/dev/null 2>&1; then
+            needs_fts=1
+        else
+            md_count=$(find "$OUT_DIR" -name "*.md" 2>/dev/null | wc -l | tr -d ' ')
+            db_count=$(sqlite3 "$FTS_DB" "SELECT count(*) FROM sessions_fts;" 2>/dev/null || echo "")
+            [[ "$md_count" != "$db_count" ]] && needs_fts=1
+        fi
+
+        [[ "$needs_fts" -eq 1 ]] && rebuild_fts_index
     fi
 fi
